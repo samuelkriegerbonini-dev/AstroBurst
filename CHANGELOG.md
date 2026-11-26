@@ -6,14 +6,173 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-25
+
 ### Added
-- Cube Prep lists the settings in which the recipe differs from the selected profile, with Apply these defaults. Import recipe selects the profile closer to the imported recipe and names a fixed kernel regularization, which stays as saved.
-- The SAGUI cube check names the bands whose PSF FWHM differs by more than 2 % from the PSF target, or from the widest band when no target is entered.
-- A Cube Prep recipe placed in the SAGUI cube field is reported, and Open this recipe in Cube Prep imports it there.
+- Cube Prep and SAGUI:
+  - Cube Prep lists the settings in which the recipe differs from the selected profile, with Apply these defaults. Import recipe selects the profile closer to the imported recipe and names a fixed kernel regularization, which stays as saved.
+  - Cube Prep starts with Cube for: Regional SEDs with SAGUI, one reference band on Inputs (the broadest PSF by default), numbered steps with attention marks, a Run button that names the first problem, a summary of the final cube with the SAGUI target or the reason it is missing, and a vs target column in the FWHM table.
+  - SAGUI is laid out as four numbered steps (Cube, R runtime, Regions, Run), checks each chosen cube at once, offers the cube bands as PSF target and DQ presets with a per-band flag table, says whether exact Ward fits, and lists regions largest first with a CSV export of one region's SED.
+  - The SAGUI cube check names the bands whose PSF FWHM differs by more than 2 % from the PSF target, or from the widest band when no target is entered.
+  - A Cube Prep recipe placed in the SAGUI cube field is reported, and Open this recipe in Cube Prep imports it there.
+  - A recipe `psfs` step can integrate the PSF over the output pixel (the area method of the desktop) instead of the LIGHTSTACK spline zoom only.
+- Photometry:
+  - The photometry panel and table show the upper limit computed by the measurement, with the sigma, the noise factor f_corr and the rule it used; a total flux that is only a lower limit reads `> x` (and its magnitude `< m`) with the reason.
+  - The depth limit comes with its error over independent draws of the aperture positions (`limit_ab_err`).
+- Spectra and cubes:
+  - Moment maps write a coverage map with the number of channels used at each pixel.
+  - Engine options, not yet in the interface: a resolving power R for line measurement (sigma and FWHM with the instrumental width removed, in the observer and the source frame, or a note that the line is unresolved at that R), and an M1/M2 weight threshold in units of the per-pixel noise for moment maps (off by default, so maps do not move).
+- MAST archive:
+  - CLASSY, ULLYSES and IUE products can be listed and downloaded (HLSP spectra, CLASSY targets with a plus sign, IUE files).
+  - Interrupted downloads are listed after a restart with Resume and Discard and count against the quota.
+  - A saved MAST token is sent with downloads from mast.stsci.edu, so exclusive-access JWST and HST files download for their owner; it never follows a redirect to another host.
+  - The Products tab separates science files from intermediate stages, labels files by suffix (cal, i2d, s3d, x1d), offers Select science files and shows the Roman calibration and CRDS versions; dataset cards show the exact level (L2a, L2b, L3), the exposure type or aperture and the programme and observation.
+  - The downloads drawer names the destination folder with Open folder, shows speed and time left, is reachable with F6 and closes with Esc, and its pill also shows in the Workspace footer. Mission tabs say whether a mission is open, needs a token or is not served by MAST.
+- Stacking: the alignment report of Stack and Drizzle gives, for a frame registered on stars, the matched stars, the inliers and the residual in pixels.
 
 ### Changed
-- Send to SAGUI and Use Cube Prep result fill the verified common PSF target only when every matched band ends within 2 % of the target FWHM in the kernel diagnostics; otherwise the target stays blank.
-- The SAGUI cube Browse lists FITS files only.
+- FITS and headers:
+  - Primary header inheritance follows the FITS INHERIT convention: an extension takes the observation cards of an empty primary, but never its structural, scaling, unit (`BUNIT`), range (`DATAMIN`, `DATAMAX`), checksum or WCS cards; nothing is inherited when the primary holds data or when the extension has `INHERIT = F`. An extension that relied on the primary's `BUNIT`, `DATAMAX` or WCS now shows without them.
+  - A keyword repeated in a header reads its first card, as astropy does (it read the last), and editing it leaves one card.
+  - Floating-point cards written by the app use the shortest text that gives back every bit (`0.1`, was `1.00000000000000E-1`, which did not round-trip most doubles).
+  - The HST flag names are used for ACS and WFC3 only; NICMOS and other retired HST instruments show raw bit numbers, as the documentation said.
+  - A MUSE `STAT` extension is an assumed variance layer, an astropy `UNCERT` extension takes its kind from `UTYPE`, and a DECam Community Pipeline mask excludes any non-zero code.
+- WCS:
+  - Sky positions of the cylindrical and pseudo-cylindrical projections with the default pole (`CAR`, `CEA`, `MER`, `SFL`, `MOL`, `AIT`, `CYP`, `HPX`) are rotated to the sky by the app itself: they agree with astropy within 1e-13 deg on every platform and at the celestial poles, where the projection library's rotation could be off by tens of degrees.
+  - The parabolic projection (`PAR`) is refused by name: the projection library places its pixels up to 1 deg (at 0.01 deg per pixel) to 64 deg away from wcslib, so such a header opens without sky coordinates and the no-WCS note says why.
+  - A non-TAN header with an explicit fiducial point or a non-default `LONPOLE` is refused by name instead of giving positions off by tens of degrees; a TAN header that states the default poles reads like one that omits them.
+  - `CUNIT1` and `CUNIT2` are read: celestial axes in arcmin, arcsec, mas or rad are converted like astropy, and an unknown unit is refused by name.
+  - An `FK5` header is converted to ICRS as astropy does, instead of being read as ICRS (about 22 mas at J2000).
+  - A TAN header with `PV` distortion terms carries its warning in every sky command, and the Gaia tie refuses it by name instead of writing `PV` cards beside a refitted matrix.
+  - Catalogue queries that cannot reach `vizier.cds.unistra.fr` are retried once on `vizier.cfa.harvard.edu`, and the result, its provenance and the Gaia tie history name the host that answered.
+  - The astrometry.net upload sends one image plane without the source header cards or the other HDUs.
+  - The coordinate grid draws meridians and parallels on fields of a few arcseconds and labels steps below one second with decimals.
+- Photometry:
+  - Aperture weights are the exact overlap of the circle with each pixel, as in photutils; the 5 x 5 sub-sampling differed by up to 1.6 % in area at a radius of 2 px.
+  - The variance of the sky level is 1.195 sigma²/n, the variance of the interquartile mean the sky uses for Gaussian noise (it was sigma²/n); the flux error of a faint source grows by about 1.6 % with the default annulus.
+  - The centroid is no longer pulled towards the centre of the brightest pixel (by 5 to 30 % of a sub-pixel offset), so positions, radial profiles and fluxes of off-centre stars move slightly.
+  - The growth-curve total of a diffraction-limited image (one calibrated by the space-telescope convention, such as JWST and HST) is flagged as a lower limit, with the aperture correction and encircled-energy radii as lower limits and the encircled-energy fraction as an upper limit; it was 9 to 12 % low and shown as a total.
+  - An aperture or annulus cut by the image edge is flagged and its flux is a lower limit.
+  - HST `flt` and `flc` frames calibrated with `PHOTFLAM` warn that no pixel area map is applied.
+  - Forced photometry: the growth correction is no longer biased low as the scatter or the number of stars grows, and three point-like artefacts cannot set it; an aperture in arcsec follows the local pixel scale of a distorted WCS; the noise factor f_corr is applied only to a band with an error layer, and the corrected magnitude error carries it.
+  - The Multi-band magnitude view, the colours and the CSV use the f_corr corrected magnitude error, like the flux view and the SED; new CSV columns `mag_ab_err_corr`, `<band>_flux_err_corr_ujy` and `<band>_mag_ab_err_corr`.
+  - The depth limit is the clipped standard deviation of the empty-aperture sums averaged over independent draws; one MAD draw moved it by about 0.07 mag between seeds.
+  - The photometry CSV has 43 columns: `upper_limit_native`, `limit_sigma`, `f_corr`, `f_corr_requested`, `limit_rule`, `total_is_lower_limit` and `total_limit_reason` are appended, and the header gains `# limit_source` and `# total_limit` lines.
+  - Light-curve, ETD and ExoClock magnitude errors use the exact factor 2.5 / ln 10 instead of 1.0857.
+- Spectra and cubes:
+  - A cube whose header has no `CRPIX3` takes the FITS default 0 instead of 1, so its spectral axis moves by one channel step.
+  - Moment maps follow the redshift of the line list, as Fit lines and line measurement do: M1, M2 and the velocity scale of M0 are in the source frame (they were off by 1 + z), and the moment FITS record the rest wavelength, velocity convention, range, windows and threshold.
+  - Moment and line-fit units are spelled so that astropy reads them: `MJy sr-1 km s-1`, `Jy beam-1 km s-1` and `K km s-1` (was `MJy/sr km/s`, which astropy reads as MJy / (km s sr)); a summed collapse writes a `BUNIT` astropy reads as the cube unit times channels and drops the flux-density calibration, and the M0 map of an MJy/sr cube is no longer calibrated as a flux density.
+  - The region sum and its Jy series leave out a channel that lost aperture spaxels instead of plotting the coverage dip as flux, and a spaxel missing in every channel no longer blanks the sum.
+  - A line fit pinned at the window bound or stopped at the sigma floor is flagged at bound instead of fitted with a small error, and the observer-frame width removes the instrumental width scaled by 1 + z.
+  - Line measurement without flux errors takes its errors from the scatter of the continuum windows, scaled up only when the reduced chi2 of the fit is above one; they were scaled by the reduced chi2 of the few line channels and understated by two times or more in about one narrow line fit out of ten.
+  - A measurement requested without continuum windows uses the Auto windows, with a guard gap of a quarter of the line width (at least 2 channels) on each side; velocity widths are labelled as observed, with a note that the instrumental width is not removed.
+  - A float32 linear `-TAB` axis is written as linear in the PV FITS, and PV products that differ in step, width or a sub-pixel move get distinct files.
+- Time series:
+  - Masked mode leaves out, and names, an integration with too few valid elements instead of dropping every channel invalid in it; a time series with one damaged integration gets a different masked white light.
+  - A grazing transit fit says that (Rp/Rs)² is not the light blocked.
+  - Samples with a finite flux and no usable `FLUX_ERROR` give no error and a note that counts them, instead of counting as zero error in sums and median or mean spectra.
+  - The periodogram warns when a capped grid has less than one sample per peak, and when a trend gives a best period longer than the series.
+- Ramps:
+  - The quick-slope noise extension is named `RNOISE` and holds the read-noise part only (`ABNOISE = read`); it was named `NOISE` and was low by 1.5 to 16 times for illuminated pixels. A `NOISE` extension with the photon term is written when a gain is given (`gain_e_per_dn`, not yet in the interface).
+  - The band scale is the read-noise sigma of a group difference (it was 8.6 % low), the median-path noise follows the slope scatter after a hit, and bright clean pixels are rarely flagged `JUMP_DET` (3 to 5 % were).
+  - A RampModel uses `GROUPDQ` and `PIXELDQ` instead of the raw saturation threshold, and is refused without `GROUPDQ`.
+  - The quick-slope FITS records every parameter that changes its numbers (`ABMINOLS`, `ABSFLOOR`, the band scales, `ABINTEG`, `ABINTNUM`, `ABNINTS`) and the DQ extension says what each bit means.
+  - The rate comparison uses the integration of the quick slope and reports a comparison with a combined rate or a short `rateints`.
+- ASDF and Roman:
+  - The unit of a Roman image comes from the unit stored with the array, else `meta.cal_step.flux` for a level 2 image (COMPLETE is MJy/sr, otherwise DN/s), else MJy/sr for a mosaic, so the Roman flux calibration now runs on real files and MJy/sr data are not converted twice; the pixel area is read from `pixel_area`, with the older name as fallback.
+  - An `FK5` gWCS frame of another equinox is precessed to J2000 (a J1975 frame was 20 arcmin off, J2000 22 mas), in the evaluator and in the header written for it.
+  - A SIP fit short of its target, an undecoded time format and a complex array shown as its modulus leave a note; an array off the science grid gets no WCS cards.
+- Stacking and calibration:
+  - Pipeline masters normalised to the sky background are scaled back to the sky level of the first light, so they keep the units of that light and its `BUNIT`, `PHOT*`, zero-point and gain cards stay true (`ABSKYREF` gives the level); negative master pixels are kept instead of clamped to zero, and `ABNORM` reads `none` when the normalisation was skipped.
+  - Sigma clipping of 3 to 5 frames compares each sample with the mean and standard deviation of the others, with the Student t limit of the chosen sigma, so noise alone is rejected at the nominal rate (it falsely rejected 6 to 12 % of good samples); only strong outliers are rejected with so few frames. Six or more frames are unchanged.
+  - The light/dark and flat/dark exposure ratios are applied as they are from 0 to 20; above 20 a warning gives the true ratio. The lower limit of 0.05 for lights is removed (10 s lights with 300 s darks took 1.5 times the dark signal).
+  - Drizzle KeepMask rejection compares frames after a scale and offset match to frame 1, so a frame with a brighter sky is no longer dropped from the background and kept on the stars; Lanczos3 says that it does not use pixfrac.
+  - A frame given weight 0 no longer fills pixels that the weighted frames lack.
+  - Stack, Drizzle and Pipeline headers record the rejection parameters, the normalisation, and one `HISTORY` line per input frame with its weight, normalisation terms, alignment and placement; Pipeline masters also list the calibration files, dark scales and sky levels, and the Pipeline reports rejected pixels by input light.
+  - Compose Stack starts from the Stacking tab rejection defaults (sigma 4.0/3.0 instead of 3.0/3.0).
+  - SPCC refuses an unknown white reference or catalogue instead of replacing it.
+- Processing:
+  - The estimated PSF used by deconvolution matches the stars (its peak was 14 to 19 % low), Richardson-Lucy keeps the flux of a star within 1 % with the default deringing (it added 8 to 18 %) and works on Jy per pixel and erg-unit images.
+  - Auto white balance no longer lets a coloured sky pedestal tint white stars, and the linked background mode removes each channel's gradient at its own amplitude.
+  - Denoised outputs carry `ABDENOIS = T` and a `HISTORY` line saying that aperture fluxes are biased by the denoising.
+  - PixelMath, FITS and PNG exports, processing results, history steps and the Compose composite record their input file, HDU, parameters (Blend weights, Processing tab steps) and app version (PNG: text chunks); the STF FITS export records its parameters at full precision and keeps NaN pixels blank instead of 0.
+- Cube Prep and SAGUI:
+  - Send to SAGUI and Use Cube Prep result fill the verified common PSF target only when every matched band ends within 2 % of the target FWHM in the kernel diagnostics; otherwise the target stays blank. A plane whose matched FWHM misses its target by more than 2 % has match status `mismatched` in the `FILTERS` table instead of `matched`.
+  - The noise-correlation map of a matched plane and the ERR plane now give the exact regional variance; `error_correlated_jy` was up to 2 times low.
+  - Zero-weight pixels outside the mosaic coverage become no data before alignment instead of entering alignment, matching and SAGUI as zeros.
+  - The LIGHTSTACK area rule on a surface-brightness (MJy/sr) input removes `BUNIT`, and an Align step with that rule before any Units step is advised against.
+  - A Cube Prep cube that mixes HST and JWST planes reaches SAGUI with DQ mask 0x3FFF.
+  - The SAGUI cube Browse lists FITS files only.
+- MAST archive: the product link and the download use the URI MAST lists (`jdaviz_uri`, else `uri`); Roman and Roman CGI product lists carry the calibration software version and the CRDS context; TESS, Roman Spectra and All missions say that MAST does not publish them (checked on 2026-11-25).
+- Server: `/v2/sessions/:sid/pixel` accepts a `box` of at most 101 (`400 bad_request` above), WCS, coordinate, pixel, cutout and render work runs off the async runtime threads, and a server built with the `release` profile warns at start to use `--profile release-server`.
+- Settings: the settings file carries a version, one setting of the wrong type falls back alone with a warning instead of resetting every setting and the Data folder, and unreadable files are kept as numbered backups.
+- Interface: missing values read `--` in the science panels; Deep Zoom says that it is unavailable in this build instead of showing a developer install hint.
+- The Rust source tree is reorganised into folders by area, with no behaviour change; the old module paths are kept by re-export. The scripts that generate the reference values of the tests are in the repository under `scripts/oracle`.
+
+### Fixed
+- FITS and headers:
+  - `TSCALn` and `TZEROn` are applied to floating-point (`E` and `D`) binary table columns, as FITS and astropy do.
+  - A `BSCALE` or `TSCALn` that is zero or not finite is refused naming the card; a file that is not FITS is refused after one block, a header without `END` at the size limit, a damaged later header is reported with its offset while the HDUs before it stay readable, and a tile-compressed image with a gap before its heap (`THEAP`) is refused by name instead of decoded early.
+  - A long `HISTORY` entry continues on more `HISTORY` cards, and a value set on a repeated keyword survives a write and reread.
+  - Loading one HDU in read mode (network drives) reads only that data unit, one plane of a row-tiled compressed cube decodes only its tiles, the primary header of a gzip file is read without a decompressed copy, plane pairing walks the headers of a file once, one cold image is loaded once for concurrent requests, and pinned images no longer evict every other cached image.
+- WCS:
+  - Old-style `PC001001` cards are read by every WCS reader and removed by the writers, so rotate, flip and Write WCS no longer corrupt the sky of a Pan-STARRS cutout.
+  - Write WCS keeps the cards of the axes beyond the celestial pair and drops the superseded ones.
+  - The SIP sky-to-pixel inverse is refined and closes the round trip on strongly distorted headers instead of returning unconverged iterates.
+  - The offline plate solve names the epoch of a catalogue without proper motions; a solve whose WCS file could not be downloaded says why it cannot be written; lookup-table distortions are named in the WCS warning; rotated fields overlap by their outlines, not by their bounding boxes.
+- Photometry and regions:
+  - Region statistics leave out, and count, pixels whose error is NaN, infinite, zero or negative, instead of adding them to the sum without an error.
+  - A DS9 region file without a coordinate system line is read as physical pixels, as DS9 does.
+  - The FFT power spectrum caps its padding instead of needing many GB on a large mosaic, and forced photometry no longer builds a growth curve per annulus cell that it discards.
+  - Statistics of a selection with no usable pixel show no numbers and the reason, on screen and in the CSV, instead of zeros.
+  - The Depth noise factor is no longer offered for a file rewritten after the depth was measured.
+- Spectra, cubes and ramps:
+  - A Gaussian line fit that reached its best values is no longer reported as "did not converge" after 50 iterations; the fit now runs up to 500 iterations. A fitted parameter that ends on a limit is named and shown without an error, and a fit of zero amplitude solves for the other parameters.
+  - With the DQ flags switched off, a note counts the flagged channels with a flux of exactly 0 that were measured as data; the continuum slope without flux errors no longer depends on the unit of the spectral axis; a line measured on a spectrum file keeps the notes of the file reader and records where the wavelength unit came from.
+  - Collapse and region extraction follow a byte budget, and a collapse above the memory budget is refused by name.
+  - A segment of a segmented time-series exposure (`uncal` with `NINTS` and `NAXIS4`) opens and is sloped as a ramp of its own integrations, naming its exposure integration.
+  - A Roman level 1 ramp parses its ASDF tree once instead of on every pixel or frame request, and group counts above the 16-bit range are not wrapped.
+  - Comparison spectra of a rewritten cube are marked as refreshing and read again instead of staying plotted as current.
+- ASDF: compressed blocks whose output differs from the declared size, lz4 chunk prefixes beyond the block, declared sizes beyond the memory budget, overflowing shapes and zero strides are refused before allocating; opening one plane of a cube decodes one plane, and reading a header no longer decodes the pixels; a gWCS without an inverse or bounding box still inverts; a format, standard or transform tag of a future major version and a structured or string data type are refused by name, and a 64-bit mask keeps its bits or is refused.
+- Time series: a placed point whose reference centroid lands on a brighter neighbour is reported; bins times integrations beyond the point limit are refused with the product; a geometry the transit model refuses is refused once for the transmission spectrum; the TSO store keeps the curves of the last 16 groups and reads a set again after one of its files is rewritten; centroid jumps are computed once per light-curve rebuild; a light-curve view resets its window and exclusions when a new run has other frames of the same length.
+- Stacking and Compose:
+  - Cancel pressed while noise weights are measured stops the run before the stack starts, and an error that merely contains the word "cancel" is no longer shown as a user cancel.
+  - Excluding frames after a channel was stacked marks that stack out of date, and Align, Blend and Export no longer use it; a Blend, stretch, star removal, colour, curves, crop, background or SPCC run that ends after Reset or after its inputs changed is discarded with a message; a weight change after Blend says the composite was made with other weights; the GHS and Auto STF histograms are read again after star removal or LRGB.
+  - Channel Blend refuses a channel of another size and blends a channel stored in column order like any other; the cosmetic-corrected frame is stamped as processed and drops its stale data range.
+  - The histogram median and MAD of an image above 4 Mpx survive one extreme finite pixel, and histograms and stretches no longer blank on erg/s/cm²/Å per pixel images; Richardson-Lucy and wavelet denoising of large mosaics use far less memory.
+- Reproducibility: a history refuses to replay from a source whose content changed even when its size and time were restored, says which app version rebuilt a step, opens read only when written by a newer build with an unknown step, stores the clamped values a step ran with, leaves no partial branch after a failed re-run, and reuses a stored PSF kernel only when its values match; FITS exports refuse a BITPIX they cannot write.
+- Cube Prep and SAGUI:
+  - Two runs of one recipe in one session publish identical files (the second no longer renames products and `HISTORY`), and a run clears the lock of a run whose process no longer exists.
+  - An external kernel whose sum is not one is named in the warnings, a fixed kernel shape far larger than the PSFs is refused, a cut after a header edit moves `GAL_XCEN` and `GAL_YCEN`, and a detector-frame PSF is reported as not rotated to the images.
+  - SAGUI refuses a private library that changed since its installation, and the result and `manifest.json` no longer hold the full label array (the labels come back from the verified binary map).
+  - A Units change under the scientific profile changes only the Align pixel-area rule instead of resetting other steps; repeated Edit steps are shown and removed one by one; unset recipe keys are compared with the engine defaults (the LIGHTSTACK D1 recipe no longer reports five empty differences); the first filter can be chosen in Remove one filter.
+  - SAGUI clears the PSF target when another cube is chosen and warns when the target is not a band of the cube; the verified target survives crops and header edits after Match and comes with a cube chosen through Use selected FITS or Browse; Validate & segment reads the cube and starts R once.
+- MAST archive: image lists are asked once per dataset and each entry goes to its own slot (MAST ignores `category` and put the full preview in the thumbnail slot); Roman thumbnails and previews served by redirect load, without sending the token to the bucket; searches wait out an open rate-limit window and honour a `Retry-After` date; a search answer with an unexpected echo or a null `totalResults` keeps its rows; load-more no longer loops on a page of rows already shown; Download and open switches to the Workspace only if you are still on that dataset; a failed search for another target says that the results on screen are the previous ones; Refresh searches again for the results shown; files ticked in a folded section are no longer downloaded; a 401 on JWST or HST shows a banner; a rejected token stays in the field.
+- Server: the `Host` header is checked on a loopback bind too, so a page that rebinds its DNS name to 127.0.0.1 can no longer read files; a request whose `Origin` names a foreign page is refused with `403 origin_not_allowed`; a path with a plane fragment such as `link.fits#hdu=0` is checked without the fragment; sky box cutouts and the sky boxes of `/v2/stats`, `/v2/histogram` and `/v2/render` start at the first pixel centre inside the box, as astropy `Cutout2D` does (about half started one pixel low).
+- Security and data:
+  - The webview no longer receives the stored astrometry.net key, only whether one is stored and a masked hint, and the retired `astrometry_api_key` setting is no longer returned.
+  - Image previews are served only from the app's folders and the files opened in the session, compared by canonical path (Windows aliases included), without a wildcard CORS origin; the output cleanup deletes only inside the app's output folder.
+  - A second running instance no longer deletes the output folder of the first, and two processes cannot write one partial download; a download without validators or a pinned checksum restarts instead of joining two versions of a file, a first transfer that ends early is continued, and small astrometry.net requests refuse answers above 64 MiB.
+- Interface:
+  - The GPU viewer no longer draws the previous image under the name of a product whose pixels failed to load, and the scale limits and auto STF of the previous image are no longer applied to a new product; the display bar says when the histogram failed, and a failed RGB pixel load shows the reason on the GPU button.
+  - A render error in one tool panel or the preview stays in that panel with a Reload panel button instead of replacing the whole window.
+  - The image centre in FK5, Galactic and Ecliptic is the same pixel as the ICRS centre (it was half a pixel off).
+  - PV, Time series, the Photometry table, Depth, Contours and the Gaia catalogue mark a result as stale when its inputs change, region statistics clear when the file is reloaded, and a file rewritten by a step that cannot be read back is marked as failed with the reason.
+  - The CPU fallback display no longer freezes after a render the worker could not serve, and an expired rate-limit banner no longer redraws the archive results every second.
+
+### Limitations
+- The WCS rotation of the cylindrical and pseudo-cylindrical projections was written to fix a precision failure seen only on macOS (about 1e-8 deg); it is confirmed on Windows against astropy and on macOS only by the next macOS CI run.
+- `PAR` headers open without a WCS until a projection library that agrees with wcslib replaces the current one. The conic projections (`COD`, `COE`, `COO`, `COP`) still go through the projection library's own formulas and rotation.
+- The photometry panel and table changes (backend upper limit, lower limit of the total, the seven CSV columns) and the Cube Prep and SAGUI changes were checked by automated tests only, not by eye in the running app. The interface does not yet show the new Pipeline channel fields (sky reference, per-light sky levels and dark scales) and still gives the old sigma-clipping hint for 3 to 5 frames.
+- MAST features that need a token (Roman and Roman CGI search, previews by redirect, Roman product URIs and downloads, exclusive-access downloads) were not checked live.
+- Not in this release, from the 1.0 review of 2026-11-25:
+  - One rule for exact zeros: the desktop region and Statistics tools still treat every exact 0.0 as padding while the server counts zeros as data; only the cube collapse has an explicit choice.
+  - A diagnosable panic: a panic still closes the desktop app at once, with no log entry, crash marker or diagnostic text.
+  - v2 server routes for stack, drizzle and pipeline: the server pipeline still loads every channel without the desktop memory check and runs cosmetic correction on X-Trans lights, and v1 jobs drop the frame count, the frames left out and the engine warnings.
+  - Drizzle still interpolates star-registered frames onto the reference grid before scattering, which loses part of the dither resolution and correlates noise (STACK-02); Stack and Drizzle still read only the SCI plane and write no ERR or weight plane (STACK-07).
+  - The display orientation: FITS row 1 is still drawn at the top, mirrored against DS9, CARTA and astropy.
+  - A transit fit with a free impact parameter that ends at b = 0 still has no errors and reports no convergence; DQ flags of a finite pixel can still spread to output pixels it touches by a roundoff sliver in Cube Prep alignment; the cube moment, collapse and line-fit commands still hash their input twice with no cancel.
 
 ## [0.9.0] - 2026-11-13
 
